@@ -81,6 +81,13 @@ rejected = []
 
 # Thread control
 running = True
+# Price table
+ITEM_PRICES = {
+    "item_A": 2.50,
+    "item_B": 3.75,
+    # add more if needed
+}
+
 
 # ---- GPIO helper ----
 class GPIOInterface:
@@ -294,19 +301,19 @@ class BarcodePrinter:
             print(f"[Printer] ERROR opening {self.port}: {e}")
             self.ser = None
 
-    def print_label(self, item_name, weight):
+    def print_label(self, item_name, weight, price):
         if not self.ser:
             print("[Printer] No serial port available. Skipping print.")
             return
-        # Very simple printer text. Adjust for your printer's language (ZPL, EPL, TSPL, ESC/POS).
-        # Example: send plain text and a newline. Most label printers accept vendor-specific commands.
-        text = f"ITEM:{item_name} WT:{weight:.2f}g\n\n"
+        # Only accepted items reach this function
+        text = f"ITEM: {item_name}\nWT: {weight:.2f}g\nPRICE: ${price:.2f}\n\n"
         try:
             self.ser.write(text.encode())
             self.ser.flush()
-            print(f"[Printer] Printed label for {item_name}, weight {weight:.2f}g")
+            print(f"[Printer] Printed price label for {item_name}, ${price:.2f}")
         except Exception as e:
-            print(f"[Printer] Write error: {e}")
+            print(f"[Printer] Printer error: {e}")
+
 
 # ---- Main control thread ----
 def rejector_worker(delay, pulse_seconds):
@@ -317,9 +324,11 @@ def rejector_worker(delay, pulse_seconds):
     gpio.pulse_rejector(pulse_seconds)
 
 def process_detection_event(event):
+    global total_price
     ts, item_name, weight, metal_flag = event
-    # If item_name is None use REFERENCE_ITEM as a fallback for comparison (operator-entered)
     name = item_name if item_name else REFERENCE_ITEM
+    price = ITEM_PRICES.get(name, 0.0)
+
     reason = None
     if metal_flag:
         reason = "Metal detected"
@@ -329,15 +338,18 @@ def process_detection_event(event):
         reason = f"Weight out of bounds ({weight:.2f}g)"
 
     if reason:
+        # Rejected items never get a price tag
         rejected.append((time.time(), name, weight, reason))
         print(f"[REJECT] {name} @ {weight:.2f}g -> {reason}")
-        # schedule rejector activation after REJECTION_DELAY
         threading.Thread(target=rejector_worker, args=(REJECTION_DELAY, REJECTOR_PULSE_SECONDS), daemon=True).start()
     else:
-        accepted.append((time.time(), name, weight))
-        print(f"[ACCEPT] {name} @ {weight:.2f}g -> printing label")
-        # print label
-        printer.print_label(name, weight)
+        # Fully accepted item → add price, print label
+        accepted.append((time.time(), name, weight, price))
+        total_price += price
+        print(f"[ACCEPT] {name} @ {weight:.2f}g -> printing label with price ${price:.2f}")
+        printer.print_label(name, weight, price)
+        print(f"Current total: ${total_price:.2f}")
+
 
 # ---- Graceful shutdown ----
 def signal_handler(sig, frame):
